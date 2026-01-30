@@ -385,10 +385,10 @@ async function attemptTurnstileCdp(page) {
                     // B. 找 Turnstile (小重试)
                     console.log('Checking for Turnstile (using CDP bypass)...');
                     let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 5; findAttempt++) {
+                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
                         cdpClickResult = await attemptTurnstileCdp(page);
                         if (cdpClickResult) break;
-                        console.log(`   >> [Find Attempt ${findAttempt + 1}/5] Turnstile checkbox not found yet...`);
+                        console.log(`   >> [Find Attempt ${findAttempt + 1}/30] Turnstile checkbox not found yet...`);
                         await page.waitForTimeout(1000);
                     }
 
