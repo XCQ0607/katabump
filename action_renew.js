@@ -10,7 +10,7 @@ chromium.use(stealth);
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 
-// --- INJECTED_SCRIPT (与 renew.js 保持一致) ---
+// --- INJECTED_SCRIPT ---
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
@@ -277,7 +277,9 @@ async function attemptTurnstileCdp(page) {
                     for (let verifyAttempt = 0; verifyAttempt < 10; verifyAttempt++) {
                         console.log(`[Verify Loop ${verifyAttempt + 1}]...`);
 
+                        // 0. Ensure modal is open, reopen if needed (RESTART flow)
                         if (!await modal.isVisible()) {
+                            console.log('   >> Modal closed. Re-opening...');
                             if (await renewBtn.isVisible()) {
                                 await renewBtn.click();
                                 try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { continue; }
@@ -287,7 +289,7 @@ async function attemptTurnstileCdp(page) {
                             }
                         }
 
-                        // A. Find Turnstile
+                        // A. Find Turnstile (Retry loop)
                         let cdpClickResult = false;
                         for (let findAttempt = 0; findAttempt < 5; findAttempt++) {
                             cdpClickResult = await attemptTurnstileCdp(page);
@@ -300,7 +302,7 @@ async function attemptTurnstileCdp(page) {
                             console.log('   >> CDP active, waiting 8s...');
                             await page.waitForTimeout(8000);
                         } else {
-                            // wait a bit
+                            // If not clicked, wait a bit
                             await page.waitForTimeout(1000);
                         }
 
@@ -319,6 +321,8 @@ async function attemptTurnstileCdp(page) {
 
                         const confirmBtn = modal.getByRole('button', { name: 'Renew' });
                         if (await confirmBtn.isVisible()) {
+
+                            // STRICT CHECK: Don't click Renew unless we clicked CAPTCHA or saw Success
                             if (!cdpClickResult && !isTurnstileSuccess) {
                                 console.log('   >> Not ready, skipping click...');
                                 await page.waitForTimeout(2000);
@@ -336,14 +340,14 @@ async function attemptTurnstileCdp(page) {
                             } catch (e) { }
 
                             if (hasError) {
-                                console.log('   >> Error detected. Resetting...');
+                                console.log('   >> Error detected. Resetting (Close Modal)...');
                                 try {
                                     const closeBtn = modal.getByLabel('Close');
                                     if (await closeBtn.isVisible()) await closeBtn.click();
                                     else await page.keyboard.press('Escape');
                                 } catch (e) { }
                                 await page.waitForTimeout(2500);
-                                continue;
+                                continue; // Loop back to step 0 to re-open modal
                             }
 
                             await page.waitForTimeout(2000);
