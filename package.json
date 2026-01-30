@@ -1,0 +1,15 @@
+{
+    "name": "katabump-automation",
+    "version": "1.0.0",
+    "description": "Automation script for Katabump renewal",
+    "main": "renew.js",
+    "scripts": {
+        "start": "node renew.js"
+    },
+    "dependencies": {
+        "axios": "^1.13.4",
+        "playwright": "^1.40.0",
+        "playwright-extra": "^4.3.6",
+        "puppeteer-extra-plugin-stealth": "^2.11.2"
+    }
+}

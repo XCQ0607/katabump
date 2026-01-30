@@ -1,0 +1,6 @@
+node_modules/
+login.json
+ChromeData_Katabump/
+.env
+*.log
+.DS_Store
