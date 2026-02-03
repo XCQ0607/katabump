@@ -1,8 +1,11 @@
 /**
  * Telegram 通知模块
- * 通过 Bot API 发送消息，需配置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID
+ * 通过 Bot API 发送消息和图片，需配置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID
  */
 const axios = require('axios');
+const FormData = require('form-data');
+const fs = require('fs');
+const path = require('path');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -72,9 +75,72 @@ async function notifyRenewResults(results, summary = '') {
     return sendMessage(text);
 }
 
+/**
+ * 发送一张图片到 Telegram
+ * @param {string} filePath - 图片本地路径
+ * @param {string} [caption] - 可选说明文字（caption 最长 1024 字符）
+ * @returns {Promise<boolean>}
+ */
+async function sendPhoto(filePath, caption = '') {
+    if (!isConfigured()) return false;
+    if (!fs.existsSync(filePath)) {
+        console.error('[Telegram] 文件不存在:', filePath);
+        return false;
+    }
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto`;
+    try {
+        const form = new FormData();
+        form.append('chat_id', TELEGRAM_CHAT_ID);
+        form.append('photo', fs.createReadStream(filePath), { filename: path.basename(filePath) });
+        if (caption) form.append('caption', caption);
+        await axios.post(url, form, {
+            headers: form.getHeaders(),
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 60000
+        });
+        return true;
+    } catch (err) {
+        console.error('[Telegram] 发送图片失败:', filePath, err.response?.data || err.message);
+        return false;
+    }
+}
+
+/**
+ * 将指定目录下所有截图发送到 Telegram（按文件名排序）
+ * @param {string} dirPath - 截图目录，如 process.cwd() + '/screenshots'
+ * @returns {Promise<{ sent: number, failed: number }>}
+ */
+async function sendScreenshotsFromDir(dirPath) {
+    if (!isConfigured()) return { sent: 0, failed: 0 };
+    if (!fs.existsSync(dirPath)) {
+        console.log('[Telegram] 截图目录不存在，跳过发送:', dirPath);
+        return { sent: 0, failed: 0 };
+    }
+    const files = fs.readdirSync(dirPath)
+        .filter(f => /\.(png|jpg|jpeg)$/i.test(f))
+        .map(f => path.join(dirPath, f))
+        .filter(p => fs.statSync(p).isFile())
+        .sort();
+    let sent = 0;
+    let failed = 0;
+    for (const filePath of files) {
+        const caption = path.basename(filePath, path.extname(filePath));
+        const ok = await sendPhoto(filePath, caption);
+        if (ok) sent++; else failed++;
+        await new Promise(r => setTimeout(r, 500));
+    }
+    if (files.length > 0) {
+        console.log(`[Telegram] 截图已发送: ${sent} 张${failed ? `, 失败 ${failed} 张` : ''}`);
+    }
+    return { sent, failed };
+}
+
 module.exports = {
     isConfigured,
     sendMessage,
+    sendPhoto,
+    sendScreenshotsFromDir,
     notifyRenewResults,
     escapeHtml
 };

@@ -564,11 +564,14 @@ async function attemptTurnstileCdp(page) {
     await browser.close();
 
     if (telegram.isConfigured() && renewResults.length > 0) {
+        const path = require('path');
         const successCount = renewResults.filter(r => r.status === 'success').length;
         const failCount = renewResults.filter(r => r.status === 'fail').length;
         const skipCount = renewResults.filter(r => r.status === 'skip').length;
         let summary = `共 ${renewResults.length} 个账号：✅ ${successCount} 成功，❌ ${failCount} 失败，⏭️ ${skipCount} 跳过。`;
         await telegram.notifyRenewResults(renewResults, summary);
+        const screenshotsDir = path.join(process.cwd(), 'screenshots');
+        await telegram.sendScreenshotsFromDir(screenshotsDir);
     }
 
     process.exit(0);
