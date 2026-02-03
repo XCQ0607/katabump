@@ -3,6 +3,7 @@ const stealth = require('puppeteer-extra-plugin-stealth')();
 const { spawn } = require('child_process');
 const http = require('http');
 const axios = require('axios');
+const telegram = require('./telegram');
 
 // 启用 stealth 插件
 chromium.use(stealth);
@@ -175,6 +176,14 @@ async function launchChrome() {
     }
 }
 
+/** 脱敏邮箱，仅显示前两位 + ***@域名 */
+function maskEmail(email) {
+    if (!email || typeof email !== 'string' || !email.includes('@')) return '***';
+    const [local, domain] = email.split('@');
+    if (local.length <= 2) return '***@' + domain;
+    return local.slice(0, 2) + '***@' + domain;
+}
+
 function getUsers() {
     // 从环境变量读取 JSON 字符串
     // GitHub Actions Secret: USERS_JSON = [{"username":..., "password":...}]
@@ -290,8 +299,11 @@ async function attemptTurnstileCdp(page) {
     await page.addInitScript(INJECTED_SCRIPT);
     console.log('Injection script added.');
 
+    const renewResults = [];
+
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
+        const userResult = { username: maskEmail(user.username), status: 'fail', message: '未知' };
         console.log(`\n=== Processing User ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
 
         try {
@@ -331,6 +343,9 @@ async function attemptTurnstileCdp(page) {
                     const errorMsg = page.getByText('Incorrect password or no account');
                     if (await errorMsg.isVisible({ timeout: 3000 })) {
                         console.error(`   >> ❌ Login failed: Incorrect password or no account for user ${user.username}`);
+                        userResult.status = 'fail';
+                        userResult.message = '登录失败';
+                        renewResults.push(userResult);
                         // Screenshot for login failure
                         const fs = require('fs');
                         const path = require('path');
@@ -354,6 +369,9 @@ async function attemptTurnstileCdp(page) {
                 await page.getByRole('link', { name: 'See' }).first().click();
             } catch (e) {
                 console.log('Could not find "See" button.');
+                userResult.status = 'fail';
+                userResult.message = '未找到 See 按钮';
+                renewResults.push(userResult);
                 continue;
             }
 
@@ -361,6 +379,7 @@ async function attemptTurnstileCdp(page) {
             let renewSuccess = false;
             // 2. 一个扁平化的主循环：尝试 Renew 整个流程 (最多 20 次)
             for (let attempt = 1; attempt <= 20; attempt++) {
+                let hasCaptchaError = false;
 
                 // 1. 如果是重试 (attempt > 1)，说明之前失败了或者刚刷新完页面
                 // 我们直接开始寻找 Renew 按钮
@@ -459,7 +478,9 @@ async function attemptTurnstileCdp(page) {
                                     let dateStr = match ? match[1] : 'Unknown Date';
                                     console.log(`   >> ⏳ Cannot renew yet. Next renewal available as of: ${dateStr}`);
 
-                                    renewSuccess = true; // Mark as done to stop retries
+                                    renewSuccess = true;
+                                    userResult.status = 'skip';
+                                    userResult.message = '未到续期时间';
                                     try {
                                         const closeBtn = modal.getByLabel('Close');
                                         if (await closeBtn.isVisible()) await closeBtn.click();
@@ -484,7 +505,8 @@ async function attemptTurnstileCdp(page) {
                         if (!await modal.isVisible()) {
                             console.log('   >> ✅ Modal closed. Renew successful!');
                             renewSuccess = true;
-                            // 成功了！退出循环
+                            userResult.status = 'success';
+                            userResult.message = '续期成功';
                             break;
                         } else {
                             console.log('   >> Modal still open but no error? Weird. Retrying loop...');
@@ -502,12 +524,22 @@ async function attemptTurnstileCdp(page) {
 
                 } else {
                     console.log('Renew button not found (Server might be already renewed or page load error).');
+                    userResult.status = 'skip';
+                    userResult.message = '未找到续期按钮或已续期';
                     break;
                 }
             }
+
+            if (!renewSuccess && userResult.message === '未知') {
+                userResult.message = '续期失败';
+            }
         } catch (err) {
             console.error(`Error processing user:`, err);
+            userResult.status = 'fail';
+            userResult.message = err.message || '异常';
         }
+
+        renewResults.push(userResult);
 
         // Snapshot before handling next user
         // In GitHub Actions, we save to 'screenshots' dir
@@ -530,5 +562,14 @@ async function attemptTurnstileCdp(page) {
 
     console.log('Done.');
     await browser.close();
+
+    if (telegram.isConfigured() && renewResults.length > 0) {
+        const successCount = renewResults.filter(r => r.status === 'success').length;
+        const failCount = renewResults.filter(r => r.status === 'fail').length;
+        const skipCount = renewResults.filter(r => r.status === 'skip').length;
+        let summary = `共 ${renewResults.length} 个账号：✅ ${successCount} 成功，❌ ${failCount} 失败，⏭️ ${skipCount} 跳过。`;
+        await telegram.notifyRenewResults(renewResults, summary);
+    }
+
     process.exit(0);
 })();

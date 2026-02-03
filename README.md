@@ -33,6 +33,17 @@
      -带认证: `http://username:password@ip:port`
    - **说明**: 脚本会自动检测代理有效性，如果支持认证会自动处理。默认不启用。
 
+6. **(可选) Telegram 通知**  
+   续期完成后可收到 Telegram 消息汇总（成功/失败/跳过及每个账号的简要结果）。
+   - 在 Telegram 中找 [@BotFather](https://t.me/BotFather) 创建机器人，获得 **Bot Token**。
+   - 与你的机器人对话一次（发任意消息），然后访问  
+     `https://api.telegram.org/bot<你的TOKEN>/getUpdates`  
+     在返回的 JSON 里找到 `"chat":{"id": 数字}`，该数字即为 **Chat ID**。
+   - 在仓库 **Settings → Secrets and variables → Actions** 中新增两个 Secret：
+     - `TELEGRAM_BOT_TOKEN`：机器人 Token
+     - `TELEGRAM_CHAT_ID`：你的 Chat ID（数字或带负号的群组 ID）
+   - 不配置则不会发送通知，不影响续期流程。
+
 ### 4. 运行结果与截图
 
 - **运行日志**: 在 Actions 中的 `Run Renew Script` 步骤查看。
