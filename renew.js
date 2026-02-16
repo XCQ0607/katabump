@@ -435,6 +435,7 @@ async function attemptTurnstileCdp(page) {
             let renewSuccess = false;
             // 2. 一个扁平化的主循环：尝试 Renew 整个流程 (最多 20 次)
             for (let attempt = 1; attempt <= 20; attempt++) {
+                let hasCaptchaError = false;
 
                 // 1. 如果是重试 (attempt > 1)，说明之前失败了或者刚刷新完页面
                 // 我们直接开始寻找 Renew 按钮
