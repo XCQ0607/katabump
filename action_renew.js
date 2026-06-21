@@ -96,25 +96,48 @@ const INJECTED_SCRIPT = `
             
             if (shadowRoot) {
                 const checkAndReport = () => {
-                    const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
-                    if (checkbox) {
-                        const rect = checkbox.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
-                            const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
-                            const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
-                            window.__turnstile_data = { xRatio, yRatio };
-                            return true;
+                    try {
+                        // 尝试多种方式查找 checkbox
+                        let checkbox = shadowRoot.querySelector('input[type="checkbox"]');
+                        if (!checkbox) {
+                            // 尝试查找其他可能的交互元素
+                            checkbox = shadowRoot.querySelector('.marker') || 
+                                       shadowRoot.querySelector('[class*="checkbox"]') ||
+                                       shadowRoot.querySelector('div[tabindex="0"]');
                         }
+                        
+                        if (checkbox) {
+                            const rect = checkbox.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
+                                const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
+                                const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
+                                window.__turnstile_data = { xRatio, yRatio, found: Date.now() };
+                                console.log('[注入] Turnstile checkbox found at:', xRatio, yRatio);
+                                return true;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('[注入] checkAndReport error:', e);
                     }
                     return false;
                 };
 
-                if (!checkAndReport()) {
-                    const observer = new MutationObserver(() => {
-                        if (checkAndReport()) observer.disconnect();
-                    });
-                    observer.observe(shadowRoot, { childList: true, subtree: true });
-                }
+                // 立即检查
+                checkAndReport();
+                
+                // 持续观察变化
+                const observer = new MutationObserver(() => {
+                    checkAndReport();
+                });
+                observer.observe(shadowRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+                
+                // 也定期检查 (每 500ms，最多 30 秒)
+                let pollCount = 0;
+                const pollInterval = setInterval(() => {
+                    if (checkAndReport() || pollCount++ > 60) {
+                        clearInterval(pollInterval);
+                    }
+                }, 500);
             }
             return shadowRoot;
         };
@@ -270,8 +293,11 @@ async function attemptTurnstileCdp(page) {
                 await client.detach();
                 return true;
             }
-        } catch (e) { }
+        } catch (e) {
+            console.log('>> CDP 检查 frame 出错:', e.message);
+        }
     }
+    console.log('>> 未在任何 frame 中发现 Turnstile 数据');
     return false;
 }
 
@@ -429,6 +455,7 @@ async function attemptTurnstileCdp(page) {
 
             // --- Renew 逻辑 ---
             let renewSuccess = false;
+            let consecutiveTurnstileFailures = 0;
             // 2. 一个扁平化的主循环：尝试 Renew 整个流程 (最多 20 次)
             for (let attempt = 1; attempt <= 20; attempt++) {
                 let hasCaptchaError = false;
@@ -459,36 +486,81 @@ async function attemptTurnstileCdp(page) {
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // B. 找 Turnstile (小重试)
+                    // B. 找 Turnstile 并等待验证完成
                     console.log('正在检查 Turnstile (使用 CDP 绕过)...');
                     let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
+                    for (let findAttempt = 0; findAttempt < 10; findAttempt++) {
                         cdpClickResult = await attemptTurnstileCdp(page);
-                        if (cdpClickResult) break;
-                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/30] 尚未找到 Turnstile 复选框...`);
+                        if (cdpClickResult) {
+                            consecutiveTurnstileFailures = 0; // Reset on success to find
+                            break;
+                        }
+                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/10] 尚未找到 Turnstile 复选框...`);
                         await page.waitForTimeout(1000);
                     }
 
                     let isTurnstileSuccess = false;
                     if (cdpClickResult) {
-                        console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
-                        await page.waitForTimeout(8000);
-                    } else {
-                        console.log('   >> 重试后仍未确认 Turnstile 复选框。');
-                    }
+                        console.log('   >> CDP 点击已发送。正在等待 Turnstile 验证完成 (最多 20秒)...');
 
-                    // C. 检查 Success 标志
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
-                            try {
-                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                    console.log('   >> 在 Turnstile iframe 中检测到 "Success!"。');
-                                    isTurnstileSuccess = true;
-                                    break;
+                        // 持续检查 Success 状态
+                        for (let waitSec = 0; waitSec < 20; waitSec++) {
+                            const frames = page.frames();
+                            for (const f of frames) {
+                                if (f.url().includes('cloudflare')) {
+                                    try {
+                                        // 检查成功状态
+                                        const successVisible = await f.evaluate(() => {
+                                            const el = document.querySelector('[role="alert"]');
+                                            return el && el.textContent.includes('Success');
+                                        }).catch(() => false);
+
+                                        if (successVisible) {
+                                            console.log('   >> 在 Turnstile iframe 中检测到 Success!');
+                                            isTurnstileSuccess = true;
+                                            consecutiveTurnstileFailures = 0; // Reset on success
+                                            break;
+                                        }
+
+                                        // 检查失败状态 - 如果验证失败，尝试点击故障排除链接
+                                        const failVisible = await f.evaluate(() => {
+                                            const el = document.querySelector('[role="alert"]');
+                                            return el && (el.textContent.includes('验证失败') || el.textContent.includes('Verification failed'));
+                                        }).catch(() => false);
+
+                                        if (failVisible) {
+                                            console.log('   >> ⚠️ Turnstile 验证失败，尝试点击故障排除链接...');
+                                            try {
+                                                const troubleshootLink = f.getByText('故障排除', { exact: false });
+                                                if (await troubleshootLink.isVisible({ timeout: 2000 })) {
+                                                    await troubleshootLink.click();
+                                                    console.log('   >> 已点击故障排除链接');
+                                                    await page.waitForTimeout(2000);
+                                                }
+                                            } catch (e) {
+                                                // 尝试点击 "卡住？" 链接
+                                                try {
+                                                    const stuckLink = f.getByText('卡住', { exact: false });
+                                                    if (await stuckLink.isVisible({ timeout: 2000 })) {
+                                                        await stuckLink.click();
+                                                        console.log('   >> 已点击卡住链接');
+                                                        await page.waitForTimeout(2000);
+                                                    }
+                                                } catch (e2) { }
+                                            }
+                                        }
+                                    } catch (e) { }
                                 }
-                            } catch (e) { }
+                            }
+                            if (isTurnstileSuccess) break;
+                            await page.waitForTimeout(1000);
                         }
+
+                        if (!isTurnstileSuccess) {
+                            console.log('   >> Turnstile 验证超时 (20秒内未完成)');
+                        }
+                    } else {
+                        console.log('   >> 重试后仍未找到 Turnstile 复选框。');
                     }
 
                     // D. 准备点击确认
@@ -579,13 +651,40 @@ async function attemptTurnstileCdp(page) {
                             renewSuccess = true;
                             break;
                         } else {
-                            console.log('   >> 模态框仍打开但无错误？重试循环...');
+                            consecutiveTurnstileFailures++;
+                            console.log(`   >> 模态框仍打开但无错误？重试循环... (连续失败: ${consecutiveTurnstileFailures})`);
+                            
+                            if (consecutiveTurnstileFailures >= 5) {
+                                console.log('   >> ⚠️ 连续 5 次 Turnstile 验证失败，放弃此用户');
+                                
+                                const fs = require('fs');
+                                const path = require('path');
+                                const photoDir = path.join(process.cwd(), 'screenshots');
+                                if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+                                const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
+                                const failShotPath = path.join(photoDir, `${safeUser}_turnstile_failed.png`);
+                                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
+                                
+                                await sendTelegramMessage(`⚠️ *Turnstile 验证失败*\n用户: ${user.username}\n状态: Cloudflare 验证码无法通过，自动跳过`, failShotPath);
+                                
+                                try {
+                                    const closeBtn = modal.getByLabel('Close');
+                                    if (await closeBtn.isVisible()) await closeBtn.click();
+                                } catch (e) { }
+                                break; // 退出主循环
+                            }
+                            
                             await page.reload();
                             await page.waitForTimeout(3000);
                             continue;
                         }
                     } else {
                         console.log('   >> 未找到模态框内的验证按钮？刷新中...');
+                        consecutiveTurnstileFailures++;
+                        if (consecutiveTurnstileFailures >= 5) {
+                            console.log('   >> ⚠️ 连续 5 次 Turnstile 验证失败，放弃此用户');
+                            break;
+                        }
                         await page.reload();
                         await page.waitForTimeout(3000);
                         continue;
