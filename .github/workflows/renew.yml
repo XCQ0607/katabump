@@ -19,14 +19,14 @@ env:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v5
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v5
       with:
-        node-version: '24'
+        node-version: '26'
 
     - name: Install Dependencies
       run: |
@@ -47,7 +47,7 @@ jobs:
         google-chrome-stable --version || true
         chromium --version || true
         node -e "const { chromium } = require('playwright'); console.log('Playwright Chromium:', chromium.executablePath())"
-      
+
     - name: Run Renew Script
       env:
         # 将 USERS_JSON 配置在 GitHub Repository Secrets 中
@@ -76,4 +76,3 @@ jobs:
         git commit -m "Update renewal date cache"
         git pull --rebase
         git push
-
