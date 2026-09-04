@@ -211,15 +211,17 @@ async function launchChrome() {
     const args = [
         `--remote-debugging-address=${DEBUG_HOST}`,
         `--remote-debugging-port=${DEBUG_PORT}`,
+        '--headless=new',
         '--no-first-run',
         '--no-default-browser-check',
-        // '--headless=new', // 使用 xvfb-run 时不需要 headless 模式，这样可以模拟有头浏览器增加成功率
         '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-dev-shm-usage',
+        '--disable-features=UseDBus',
         '--window-size=1280,720',
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--user-data-dir=/tmp/chrome_user_data', // 必须指定用户数据目录，否则远程调试可能失败
-        '--disable-dev-shm-usage' // 避免共享内存不足
+        `--user-data-dir=${path.join(require('os').tmpdir(), `katabump-chrome-${process.pid}`)}`
     ];
 
     if (PROXY_CONFIG) {
@@ -229,7 +231,12 @@ async function launchChrome() {
 
     const chrome = spawn(chromePath, args, {
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...process.env,
+            // GitHub Actions 可能继承无效的 D-Bus 地址，避免 Chrome 启动阶段因此退出。
+            DBUS_SESSION_BUS_ADDRESS: ''
+        }
     });
 
     let chromeOutput = '';

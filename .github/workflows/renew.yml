@@ -56,8 +56,8 @@ jobs:
         HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      # 使用 xvfb-run 模拟有头环境运行
-      run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+      # Chrome 使用 headless=new，不依赖 D-Bus 或 Xvfb
+      run: node action_renew.js
 
     - name: Persist renewal date cache
       if: always()
