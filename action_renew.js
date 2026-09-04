@@ -397,6 +397,59 @@ function shouldSkipUntilRenewalDate(cacheEntry, now = new Date()) {
     return true;
 }
 
+async function getLoginInputs(page) {
+    const emailSelectors = [
+        'input[type="email"]',
+        'input[name="email"]',
+        'input[autocomplete="email"]',
+        'input[placeholder*="mail" i]',
+        'input[type="text"]'
+    ];
+    const passwordSelectors = [
+        'input[type="password"]',
+        'input[name="password"]',
+        'input[autocomplete="current-password"]'
+    ];
+
+    for (const emailSelector of emailSelectors) {
+        const email = page.locator(emailSelector).first();
+        if (!await email.isVisible({ timeout: 500 })) continue;
+        for (const passwordSelector of passwordSelectors) {
+            const password = page.locator(passwordSelector).first();
+            if (await password.isVisible({ timeout: 500 })) return { email, password };
+        }
+    }
+
+    return null;
+}
+
+async function waitForLoginForm(page, timeout = 15000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        const inputs = await getLoginInputs(page);
+        if (inputs) return inputs;
+        await page.waitForTimeout(500);
+    }
+    return null;
+}
+
+async function clickLoginButton(page) {
+    const selectors = [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Login")',
+        'button:has-text("Sign in")'
+    ];
+    for (const selector of selectors) {
+        const button = page.locator(selector).first();
+        if (await button.isVisible({ timeout: 500 })) {
+            await button.click();
+            return true;
+        }
+    }
+    return false;
+}
+
 async function saveScreenshot(page, fileName) {
     const photoDir = ensureScreenshotDir();
     const screenshotPath = path.join(photoDir, fileName);
@@ -684,11 +737,12 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
 
             console.log('正在输入凭据...');
             try {
-                const emailInput = page.getByRole('textbox', { name: 'Email' });
-                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
-                await emailInput.fill(user.username);
-                const pwdInput = page.getByRole('textbox', { name: 'Password' });
-                await pwdInput.fill(user.password);
+                const loginInputs = await waitForLoginForm(page);
+                if (!loginInputs) {
+                    throw new Error(`未找到登录表单，当前 URL: ${page.url()}`);
+                }
+                await loginInputs.email.fill(user.username);
+                await loginInputs.password.fill(user.password);
                 await page.waitForTimeout(500);
 
                 // --- Cloudflare Turnstile Bypass for Login ---
@@ -726,7 +780,9 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 }
                 // --------------------------------------------
 
-                await page.getByRole('button', { name: 'Login', exact: true }).click();
+                if (!await clickLoginButton(page)) {
+                    throw new Error('未找到可点击的登录按钮');
+                }
 
                 // User Request: Check for incorrect password
                 try {
