@@ -8,8 +8,8 @@ It supports both **Windows Local Execution** and **GitHub Actions Cloud Executio
 
 ## ✨ Features
 
-- **Smart Bypass**: Uses CDP to simulate realistic mouse trajectories and clicks, combined with screen coordinate spoofing, to achieve a high success rate in bypassing Cloudflare Turnstile.
-- **Auto-Retry**: Built-in strict verification retry mechanism. It automatically restarts the verification flow if the CAPTCHA check fails.
+- **Adaptive verification**: The renewal modal first checks whether a Cloudflare Turnstile challenge is actually present. If present, the corresponding verification flow runs; otherwise, the script directly clicks the `Renew` button in the modal.
+- **Auto-Retry**: Refreshes the page and retries when verification fails or the page enters an unexpected state.
 - **Multi-User**: Supports batch renewal for multiple accounts.
 - **Cloud/Local**: Can run on your local machine or automatically on part of a daily schedule using GitHub Actions.
 

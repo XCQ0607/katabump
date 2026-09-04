@@ -4,7 +4,9 @@ const stealth = require('puppeteer-extra-plugin-stealth')();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { spawn, exec } = require('child_process');
+const { spawn } = require('child_process');
+const FormData = require('form-data');
+const crypto = require('crypto');
 const http = require('http');
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
@@ -13,32 +15,32 @@ const TG_CHAT_ID = process.env.TG_CHAT_ID;
 async function sendTelegramMessage(message, imagePath = null) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
 
-    // 1. 发送文字消息
     try {
         const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
         await axios.post(url, {
             chat_id: TG_CHAT_ID,
             text: message,
-            parse_mode: 'Markdown'
+            disable_web_page_preview: true
         });
         console.log('[Telegram] Message sent.');
     } catch (e) {
         console.error('[Telegram] Failed to send message:', e.message);
     }
 
-    // 2. 发送图片 (如果有)
     if (imagePath && fs.existsSync(imagePath)) {
-        console.log('[Telegram] Sending photo...');
-        // 使用 curl 发送图片，避免引入额外的 multipart 依赖
-        // 注意：Windows 本地测试可能需要环境支持 curl，GitHub Actions (Ubuntu) 默认支持
-        const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}"`;
-        await new Promise(resolve => {
-            exec(cmd, (err) => {
-                if (err) console.error('[Telegram] Failed to send photo via curl:', err.message);
-                else console.log('[Telegram] Photo sent.');
-                resolve();
+        try {
+            const form = new FormData();
+            form.append('chat_id', TG_CHAT_ID);
+            form.append('photo', fs.createReadStream(imagePath));
+            await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, form, {
+                headers: form.getHeaders(),
+                maxBodyLength: Infinity,
+                timeout: 30000
             });
-        });
+            console.log('[Telegram] Photo sent.');
+        } catch (e) {
+            console.error('[Telegram] Failed to send photo:', e.message);
+        }
     }
 }
 
@@ -304,8 +306,23 @@ const MONTHS = {
     december: 11, dec: 11
 };
 
-function getUserCacheKey(index) {
-    return `user_${index + 1}`;
+function normalizeUsername(username) {
+    return String(username || '').trim().toLowerCase();
+}
+
+function getUserCacheKey(user) {
+    const digest = crypto.createHash('sha256')
+        .update(normalizeUsername(user.username))
+        .digest('hex')
+        .slice(0, 16);
+    return `user_${digest}`;
+}
+
+function maskUsername(username) {
+    const value = String(username || 'unknown');
+    const at = value.indexOf('@');
+    if (at <= 1) return '***';
+    return `${value.slice(0, 2)}***${value.slice(at)}`;
 }
 
 function loadRenewalCache() {
@@ -321,7 +338,9 @@ function loadRenewalCache() {
 
 function saveRenewalCache(cache) {
     try {
-        fs.writeFileSync(RENEWAL_CACHE_PATH, `${JSON.stringify(cache, null, 2)}\n`);
+        const tempPath = `${RENEWAL_CACHE_PATH}.tmp`;
+        fs.writeFileSync(tempPath, `${JSON.stringify(cache, null, 2)}\n`, 'utf8');
+        fs.renameSync(tempPath, RENEWAL_CACHE_PATH);
         console.log(`[缓存] 续期缓存已保存: ${RENEWAL_CACHE_PATH}`);
     } catch (e) {
         console.log(`[缓存] 保存续期缓存失败: ${e.message}`);
@@ -384,9 +403,57 @@ async function saveScreenshot(page, fileName) {
     }
 }
 
+function isTurnstileFrame(frame) {
+    const frameUrl = frame.url().toLowerCase();
+    return frameUrl.includes('challenges.cloudflare.com') ||
+        frameUrl.includes('turnstile') ||
+        frameUrl.includes('cloudflare');
+}
+
+async function hasTurnstileChallenge(page, modal) {
+    // 只把 Cloudflare/Turnstile frame 中的 checkbox 识别为 Turnstile，
+    // 避免把新的无验证码续期弹窗或其他普通 iframe 误判为验证码。
+    for (const frame of page.frames()) {
+        if (!isTurnstileFrame(frame)) continue;
+
+        try {
+            const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
+            if (data) return true;
+
+            const checkbox = frame.locator('input[type="checkbox"], [role="checkbox"]').first();
+            if (await checkbox.isVisible({ timeout: 300 })) return true;
+        } catch (e) { }
+    }
+
+    try {
+        const selectors = [
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[title*="turnstile" i]',
+            'iframe[title*="cloudflare" i]'
+        ];
+        for (const selector of selectors) {
+            if (await modal.locator(selector).first().isVisible({ timeout: 300 })) {
+                return true;
+            }
+        }
+    } catch (e) { }
+
+    return false;
+}
+
+async function waitForTurnstileChallenge(page, modal, timeout = 3000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await hasTurnstileChallenge(page, modal)) return true;
+        await page.waitForTimeout(250);
+    }
+    return false;
+}
+
 async function attemptTurnstileCdp(page) {
     const frames = page.frames();
     for (const frame of frames) {
+        if (!isTurnstileFrame(frame)) continue;
         try {
             const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
 
@@ -569,14 +636,20 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
 
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
+        if (!user || !normalizeUsername(user.username) || !user.password) {
+            console.error(`[配置] 用户 ${i + 1} 缺少有效的 username 或 password，跳过。`);
+            hasFailure = true;
+            continue;
+        }
         const safeUsername = safeFileName(user.username);
-        const cacheKey = getUserCacheKey(i);
+        const cacheKey = getUserCacheKey(user);
+        const displayUsername = maskUsername(user.username);
         const cacheEntry = renewalCache[cacheKey];
-        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
+        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} (${displayUsername}) ===`);
 
         if (shouldSkipUntilRenewalDate(cacheEntry)) {
             console.log(`[缓存] 当前未到站点返回的下次可续期日期 ${cacheEntry.nextRenewalDate}，跳过本次运行。`);
-            await sendTelegramMessage(`⏳ *续期暂缓*\n用户: ${user.username}\n原因: 未到站点返回的下次可续期日期\n下次可用: ${cacheEntry.nextRenewalDate}`);
+            await sendTelegramMessage(`⏳ *续期暂缓*\n用户: ${displayUsername}\n原因: 未到站点返回的下次可续期日期\n下次可用: ${cacheEntry.nextRenewalDate}`);
             continue;
         }
 
@@ -652,11 +725,11 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 try {
                     const errorMsg = page.getByText('Incorrect password or no account');
                     if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
+                        console.error(`   >> ❌ 登录失败: 用户 ${displayUsername} 账号或密码错误`);
                         hasFailure = true;
                         const failShotPath = await saveScreenshot(page, `${safeUsername}_login_failed.png`);
 
-                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
+                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${displayUsername}\n原因: 账号或密码错误`, failShotPath);
 
                         continue;
                     }
@@ -709,38 +782,38 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // B. 找 Turnstile (小重试)
-                    console.log('正在检查 Turnstile (使用 CDP 绕过)...');
+                    // 新版续期弹窗可能完全不包含 Turnstile：此时直接确认续期。
+                    // 只有明确检测到 Cloudflare/Turnstile 控件时，才执行验证码处理。
+                    const hasTurnstile = await waitForTurnstileChallenge(page, modal);
                     let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
-                        cdpClickResult = await attemptTurnstileCdp(page);
-                        if (cdpClickResult) break;
-                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/30] 尚未找到 Turnstile 复选框...`);
-                        await page.waitForTimeout(1000);
-                    }
+                    if (hasTurnstile) {
+                        console.log('检测到 Turnstile，开始执行验证流程...');
+                        for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
+                            cdpClickResult = await attemptTurnstileCdp(page);
+                            if (cdpClickResult) break;
+                            console.log(`   >> [寻找尝试 ${findAttempt + 1}/30] 尚未找到 Turnstile 复选框...`);
+                            await page.waitForTimeout(1000);
+                        }
 
-                    let isTurnstileSuccess = false;
-                    if (cdpClickResult) {
-                        console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
-                        await page.waitForTimeout(8000);
-                    } else {
-                        console.log('   >> 重试后仍未确认 Turnstile 复选框，尝试识别当前模态框内可见复选框...');
-                        const checkboxClickResult = await clickVisibleCaptchaCheckbox(page, modal);
-                        if (checkboxClickResult) {
-                            console.log('   >> 可见复选框点击已发送。等待 8秒验证...');
+                        if (cdpClickResult) {
+                            console.log('   >> CDP 点击已发送，等待 Cloudflare 检查...');
                             await page.waitForTimeout(8000);
                         } else {
-                            console.log('   >> 当前模态框内仍未找到可点击的 Captcha 复选框。');
+                            console.log('   >> 未能通过 CDP 定位 Turnstile，尝试普通可见控件...');
+                            const checkboxClickResult = await clickVisibleCaptchaCheckbox(page, modal);
+                            if (checkboxClickResult) await page.waitForTimeout(8000);
                         }
+                    } else {
+                        console.log('未检测到 Turnstile，直接执行续期确认。');
                     }
 
-                    // C. 检查 Success 标志
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
+                    let isTurnstileSuccess = !hasTurnstile;
+                    if (hasTurnstile) {
+                        const frames = page.frames();
+                        for (const f of frames) {
+                            if (!isTurnstileFrame(f)) continue;
                             try {
                                 if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                    console.log('   >> 在 Turnstile iframe 中检测到 "Success!"。');
                                     isTurnstileSuccess = true;
                                     break;
                                 }
@@ -748,8 +821,9 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                         }
                     }
 
-                    // D. 准备点击确认
-                    const confirmBtn = modal.getByRole('button', { name: 'Renew' });
+                    // 无论是否存在验证码，最终都点击弹窗中的 Renew。
+                    // 新版无验证码弹窗会在这一步直接完成续签。
+                    const confirmBtn = modal.getByRole('button', { name: 'Renew', exact: true }).last();
                     if (await confirmBtn.isVisible()) {
 
                         // User Requested: Screenshot BEFORE final click
@@ -795,7 +869,7 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                                     // 截图证明
                                     const skipShotPath = await saveScreenshot(page, `${safeUsername}_skip.png`);
 
-                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${nextRenewalDate || dateStr}`, skipShotPath);
+                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${displayUsername}\n原因: 还没到时间\n下次可用: ${nextRenewalDate || dateStr}`, skipShotPath);
 
                                     renewSuccess = true; // Mark as done to stop retries
                                     try {
@@ -825,7 +899,7 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                             // 截图成功状态
                             const successShotPath = await saveScreenshot(page, `${safeUsername}_success.png`);
 
-                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
+                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${displayUsername}\n状态: 服务器已成功续期！`, successShotPath);
                             renewSuccess = true;
                             break;
                         } else {
@@ -851,7 +925,7 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 hasFailure = true;
                 const failShotPath = await saveScreenshot(page, `${safeUsername}_renew_failed.png`);
                 await sendTelegramMessage(
-                    `❌ *续期失败*\n用户: ${user.username}\n原因: 未能确认续期成功。请查看截图和 Actions 日志。`,
+                    `❌ *续期失败*\n用户: ${displayUsername}\n原因: 未能确认续期成功。请查看截图和 Actions 日志。`,
                     failShotPath
                 );
             }
@@ -860,7 +934,7 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
             hasFailure = true;
             const errorShotPath = await saveScreenshot(page, `${safeUsername}_error.png`);
             await sendTelegramMessage(
-                `❌ *处理失败*\n用户: ${user.username}\n原因: 脚本异常: ${err.message}`,
+                `❌ *处理失败*\n用户: ${displayUsername}\n原因: 脚本异常: ${err.message}`,
                 errorShotPath
             );
         }

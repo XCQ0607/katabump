@@ -9,7 +9,7 @@ const http = require('http');
 // 启用 stealth 插件
 chromium.use(stealth);
 
-const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const CHROME_PATH = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
 const DEBUG_PORT = 9222;
 const HEADLESS = false;
@@ -229,9 +229,50 @@ async function saveScreenshot(page, fileName) {
  * 核心功能：遍历所有 Frames，查找被注入脚本标记的 Turnstile 坐标，
  * 计算绝对屏幕坐标，并使用 CDP 发送原生鼠标点击事件。
  */
+function isTurnstileFrame(frame) {
+    const frameUrl = frame.url().toLowerCase();
+    return frameUrl.includes('challenges.cloudflare.com') ||
+        frameUrl.includes('turnstile') ||
+        frameUrl.includes('cloudflare');
+}
+
+async function hasTurnstileChallenge(page, modal) {
+    for (const frame of page.frames()) {
+        if (!isTurnstileFrame(frame)) continue;
+        try {
+            const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
+            if (data) return true;
+            const checkbox = frame.locator('input[type="checkbox"], [role="checkbox"]').first();
+            if (await checkbox.isVisible({ timeout: 300 })) return true;
+        } catch (e) { }
+    }
+
+    try {
+        const selectors = [
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[title*="turnstile" i]',
+            'iframe[title*="cloudflare" i]'
+        ];
+        for (const selector of selectors) {
+            if (await modal.locator(selector).first().isVisible({ timeout: 300 })) return true;
+        }
+    } catch (e) { }
+    return false;
+}
+
+async function waitForTurnstileChallenge(page, modal, timeout = 3000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await hasTurnstileChallenge(page, modal)) return true;
+        await page.waitForTimeout(250);
+    }
+    return false;
+}
+
 async function attemptTurnstileCdp(page) {
     const frames = page.frames();
     for (const frame of frames) {
+        if (!isTurnstileFrame(frame)) continue;
         try {
             // 检查当前 Frame 是否捕获到了 Turnstile 数据
             const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
@@ -565,56 +606,41 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // B. 找 Turnstile (小重试)
-                    console.log('Checking for Turnstile (using CDP bypass)...');
+                    // 新版弹窗可能不再包含 Turnstile；只有明确发现 Cloudflare/Turnstile
+                    // 控件时才执行验证，否则直接点击弹窗中的 Renew。
+                    const hasTurnstile = await waitForTurnstileChallenge(page, modal);
                     let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
-                        cdpClickResult = await attemptTurnstileCdp(page);
-                        if (cdpClickResult) break;
-                        console.log(`   >> [Find Attempt ${findAttempt + 1}/30] Turnstile checkbox not found yet...`);
-                        await page.waitForTimeout(1000);
-                    }
+                    if (hasTurnstile) {
+                        console.log('Detected Turnstile. Starting verification...');
+                        for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
+                            cdpClickResult = await attemptTurnstileCdp(page);
+                            if (cdpClickResult) break;
+                            await page.waitForTimeout(1000);
+                        }
 
-                    let isTurnstileSuccess = false;
-                    if (cdpClickResult) {
-                        console.log('   >> CDP Click active. Waiting 8s for Cloudflare check...');
-                        await page.waitForTimeout(8000);
-                    } else {
-                        console.log('   >> Turnstile checkbox not confirmed after retries. Trying visible checkbox in current modal...');
-                        const checkboxClickResult = await clickVisibleCaptchaCheckbox(page, modal);
-                        if (checkboxClickResult) {
-                            console.log('   >> Visible checkbox click sent. Waiting 8s for verification...');
+                        if (cdpClickResult) {
+                            console.log('CDP click sent. Waiting for verification...');
                             await page.waitForTimeout(8000);
                         } else {
-                            console.log('   >> Still could not find a clickable captcha checkbox in the current modal.');
+                            console.log('CDP did not locate Turnstile. Trying visible checkbox...');
+                            if (await clickVisibleCaptchaCheckbox(page, modal)) {
+                                await page.waitForTimeout(8000);
+                            }
                         }
+                    } else {
+                        console.log('No Turnstile detected. Proceeding directly to renewal.');
                     }
 
-                    // C. 检查 Success 标志
-                    const frames = page.frames();
-                    for (const f of frames) {
-                        if (f.url().includes('cloudflare')) {
-                            try {
-                                if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                    console.log('   >> Detected "Success!" in Turnstile iframe.');
-                                    isTurnstileSuccess = true;
-                                    break;
-                                }
-                            } catch (e) { }
-                        }
-                    }
-
-                    // D. 准备点击确认
-                    const confirmBtn = modal.getByRole('button', { name: 'Renew' });
+                    const confirmBtn = modal.getByRole('button', { name: 'Renew', exact: true }).last();
                     if (await confirmBtn.isVisible()) {
 
                         // User Requested: Screenshot BEFORE final click (Regardless of CDP status)
                         const photoDir = path.join(__dirname, 'photo');
                         if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const tsScreenshotName = `${user.username}_Turnstile_${attempt}.png`;
+                        const screenshotName = `${safeFileName(user.username)}_Renew_${attempt}.png`;
                         try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
-                            console.log(`   >> 📸 Snapshot saved: ${tsScreenshotName}`);
+                            await page.screenshot({ path: path.join(photoDir, screenshotName), fullPage: true });
+                            console.log(`   >> 📸 Snapshot saved: ${screenshotName}`);
                         } catch (e) {
                             console.log('   >> Failed to take Turnstile snapshot:', e.message);
                         }
