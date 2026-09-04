@@ -397,67 +397,6 @@ function shouldSkipUntilRenewalDate(cacheEntry, now = new Date()) {
     return true;
 }
 
-async function isVisible(locator, timeout = 500) {
-    try {
-        return await locator.isVisible({ timeout });
-    } catch (e) {
-        return false;
-    }
-}
-
-async function getLoginInputs(page) {
-    const emailSelectors = [
-        'input[type="email"]',
-        'input[name="email"]',
-        'input[autocomplete="email"]',
-        'input[placeholder*="mail" i]',
-        'input[type="text"]'
-    ];
-    const passwordSelectors = [
-        'input[type="password"]',
-        'input[name="password"]',
-        'input[autocomplete="current-password"]'
-    ];
-
-    for (const emailSelector of emailSelectors) {
-        const email = page.locator(emailSelector).first();
-        if (!await isVisible(email)) continue;
-        for (const passwordSelector of passwordSelectors) {
-            const password = page.locator(passwordSelector).first();
-            if (await isVisible(password)) return { email, password };
-        }
-    }
-
-    return null;
-}
-
-async function waitForLoginForm(page, timeout = 15000) {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-        const inputs = await getLoginInputs(page);
-        if (inputs) return inputs;
-        await page.waitForTimeout(500);
-    }
-    return null;
-}
-
-async function clickLoginButton(page) {
-    const selectors = [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button:has-text("Login")',
-        'button:has-text("Sign in")'
-    ];
-    for (const selector of selectors) {
-        const button = page.locator(selector).first();
-        if (await isVisible(button)) {
-            await button.click();
-            return true;
-        }
-    }
-    return false;
-}
-
 async function saveScreenshot(page, fileName) {
     const photoDir = ensureScreenshotDir();
     const screenshotPath = path.join(photoDir, fileName);
@@ -728,33 +667,29 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 await page.addInitScript(INJECTED_SCRIPT);
             }
 
-            // --- 登录逻辑 (简略版，逻辑一致) ---
-            if (page.url().includes('dashboard')) {
+            // --- 登录逻辑 (保持原版流程) ---
+            if (page.url().includes('/auth/login')) {
+                // 已在登录页，继续填写表单
+            } else if (page.url().includes('dashboard')) {
                 await page.goto('https://dashboard.katabump.com/auth/logout');
                 await page.waitForTimeout(2000);
-            }
-            // 总是先去登录页
-            await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await page.waitForTimeout(2000);
-            if (page.url().includes('dashboard')) {
-                // 如果登出没成功，再次登出
-                await page.goto('https://dashboard.katabump.com/auth/logout');
-                await page.waitForTimeout(2000);
+            } else {
                 await page.goto('https://dashboard.katabump.com/auth/login');
+                await page.waitForTimeout(2000);
+                if (page.url().includes('dashboard')) {
+                    await page.goto('https://dashboard.katabump.com/auth/logout');
+                    await page.waitForTimeout(2000);
+                    await page.goto('https://dashboard.katabump.com/auth/login');
+                }
             }
 
             console.log('正在输入凭据...');
             try {
-                const loginInputs = await waitForLoginForm(page);
-                if (!loginInputs) {
-                    const loginShotPath = await saveScreenshot(page, `${safeUsername}_login_form_missing.png`);
-                    console.error(`未找到登录表单，当前 URL: ${page.url()}，页面标题: ${await page.title()}`);
-                    await sendTelegramMessage(`❌ *登录页面异常*\n用户: ${displayUsername}\n原因: 未找到登录表单`, loginShotPath);
-                    hasFailure = true;
-                    continue;
-                }
-                await loginInputs.email.fill(user.username);
-                await loginInputs.password.fill(user.password);
+                const emailInput = page.getByRole('textbox', { name: 'Email' });
+                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
+                await emailInput.fill(user.username);
+                const pwdInput = page.getByRole('textbox', { name: 'Password' });
+                await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
                 // --- Cloudflare Turnstile Bypass for Login ---
@@ -790,26 +725,19 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 } else {
                     console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
                 }
-                // --------------------------------------------
 
-                if (!await clickLoginButton(page)) {
-                    throw new Error('未找到可点击的登录按钮');
-                }
+                await page.getByRole('button', { name: 'Login', exact: true }).click();
 
-                // User Request: Check for incorrect password
                 try {
                     const errorMsg = page.getByText('Incorrect password or no account');
                     if (await errorMsg.isVisible({ timeout: 3000 })) {
                         console.error(`   >> ❌ 登录失败: 用户 ${displayUsername} 账号或密码错误`);
                         hasFailure = true;
                         const failShotPath = await saveScreenshot(page, `${safeUsername}_login_failed.png`);
-
                         await sendTelegramMessage(`❌ *登录失败*\n用户: ${displayUsername}\n原因: 账号或密码错误`, failShotPath);
-
                         continue;
                     }
                 } catch (e) { }
-
             } catch (e) {
                 console.log('登录错误:', e.message);
             }
