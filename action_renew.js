@@ -397,6 +397,14 @@ function shouldSkipUntilRenewalDate(cacheEntry, now = new Date()) {
     return true;
 }
 
+async function isVisible(locator, timeout = 500) {
+    try {
+        return await locator.isVisible({ timeout });
+    } catch (e) {
+        return false;
+    }
+}
+
 async function getLoginInputs(page) {
     const emailSelectors = [
         'input[type="email"]',
@@ -413,10 +421,10 @@ async function getLoginInputs(page) {
 
     for (const emailSelector of emailSelectors) {
         const email = page.locator(emailSelector).first();
-        if (!await email.isVisible({ timeout: 500 })) continue;
+        if (!await isVisible(email)) continue;
         for (const passwordSelector of passwordSelectors) {
             const password = page.locator(passwordSelector).first();
-            if (await password.isVisible({ timeout: 500 })) return { email, password };
+            if (await isVisible(password)) return { email, password };
         }
     }
 
@@ -442,7 +450,7 @@ async function clickLoginButton(page) {
     ];
     for (const selector of selectors) {
         const button = page.locator(selector).first();
-        if (await button.isVisible({ timeout: 500 })) {
+        if (await isVisible(button)) {
             await button.click();
             return true;
         }
@@ -726,7 +734,7 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 await page.waitForTimeout(2000);
             }
             // 总是先去登录页
-            await page.goto('https://dashboard.katabump.com/auth/login');
+            await page.goto('https://dashboard.katabump.com/auth/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForTimeout(2000);
             if (page.url().includes('dashboard')) {
                 // 如果登出没成功，再次登出
@@ -739,7 +747,11 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
             try {
                 const loginInputs = await waitForLoginForm(page);
                 if (!loginInputs) {
-                    throw new Error(`未找到登录表单，当前 URL: ${page.url()}`);
+                    const loginShotPath = await saveScreenshot(page, `${safeUsername}_login_form_missing.png`);
+                    console.error(`未找到登录表单，当前 URL: ${page.url()}，页面标题: ${await page.title()}`);
+                    await sendTelegramMessage(`❌ *登录页面异常*\n用户: ${displayUsername}\n原因: 未找到登录表单`, loginShotPath);
+                    hasFailure = true;
+                    continue;
                 }
                 await loginInputs.email.fill(user.username);
                 await loginInputs.password.fill(user.password);
