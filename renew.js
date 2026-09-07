@@ -495,10 +495,11 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
 
             console.log('Filling credentials...');
             try {
-                const emailInput = page.getByRole('textbox', { name: 'Email' });
-                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
+                // 站点登录页 label 可能非英文，改用稳定的 id/name/type 选择器定位
+                const emailInput = page.locator('#email, input[name="email"], input[type="email"]').first();
+                await emailInput.waitFor({ state: 'visible', timeout: 15000 });
                 await emailInput.fill(user.username);
-                const pwdInput = page.getByRole('textbox', { name: 'Password' });
+                const pwdInput = page.locator('#password, input[name="password"], input[type="password"]').first();
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
@@ -539,7 +540,8 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
                 }
                 // --------------------------------------------
 
-                await page.getByRole('button', { name: 'Login', exact: true }).click();
+                // 登录按钮为 <button id="submit" type="submit">，优先用稳定选择器
+                await page.locator('#submit, button[type="submit"]').first().click();
 
                 // User Request: Check for "Incorrect password or no account"
                 try {
