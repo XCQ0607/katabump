@@ -687,7 +687,28 @@ async function clickVisibleCaptchaCheckbox(page, modal) {
             try {
                 // 站点登录页 label 可能非英文，改用稳定的 id/name/type 选择器定位
                 const emailInput = page.locator('#email, input[name="email"], input[type="email"]').first();
-                await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+                try {
+                    await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+                } catch (waitErr) {
+                    // 找不到登录框：多半是被 Cloudflare 拦截或返回了 challenge 页。打印诊断信息并截图。
+                    const currentUrl = page.url();
+                    const pageTitle = await page.title().catch(() => '(无法获取标题)');
+                    const bodyText = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+                    const snippet = bodyText.replace(/\s+/g, ' ').trim().slice(0, 300);
+                    console.error(`   >> ❌ 未找到登录框。URL=${currentUrl} 标题=${pageTitle}`);
+                    console.error(`   >> 页面正文片段: ${snippet}`);
+
+                    const blockedMarkers = ['sorry, you have been blocked', 'unable to access', 'error 1020', 'cloudflare', 'attention required', 'checking your browser'];
+                    const isBlocked = blockedMarkers.some(m => (pageTitle + ' ' + snippet).toLowerCase().includes(m));
+
+                    const diagShot = await saveScreenshot(page, `${safeUsername}_login_page.png`);
+                    await sendTelegramMessage(
+                        `❌ *登录页面异常*\n用户: ${displayUsername}\n${isBlocked ? '原因: 疑似被 Cloudflare/站点拦截' : '原因: 未找到登录框'}\nURL: ${currentUrl}\n标题: ${pageTitle}`,
+                        diagShot
+                    );
+                    hasFailure = true;
+                    continue;
+                }
                 await emailInput.fill(user.username);
                 const pwdInput = page.locator('#password, input[name="password"], input[type="password"]').first();
                 await pwdInput.fill(user.password);
